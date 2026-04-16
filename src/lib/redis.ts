@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis";
 
 type SetOptions = {
-  ex?: number;
+  ex: number;
 };
 
 type RedisClient = {
