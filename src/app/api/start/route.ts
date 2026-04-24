@@ -3,26 +3,30 @@ import { NextResponse } from "next/server";
 import { llmChat } from "@/lib/ai";
 import { redis } from "@/lib/redis";
 import {
-  INTERVIEW_SYSTEM_PROMPT,
+  buildSystemPrompt,
   START_QUESTION_USER_PROMPT,
 } from "@/lib/prompts";
-import type { Message, StartResponse } from "@/types";
+import type { Message, StartResponse, StartRequest } from "@/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 6;
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    const json = (await req.json().catch(() => ({}))) as StartRequest;
+    const { resumeText, jdText } = json;
+
     const sessionId = crypto.randomUUID();
+
+    const systemPrompt = buildSystemPrompt(resumeText, jdText);
 
     const question = (await llmChat({
       messages: [
         {
           role: "system",
-          content:
-            "你是一位资深前端技术面试官。现在请直接给出第一个技术问题。只输出问题本身，不要输出任何多余内容。",
+          content: systemPrompt,
         },
         { role: "user", content: START_QUESTION_USER_PROMPT },
       ],
@@ -31,7 +35,7 @@ export async function POST() {
     })).trim();
 
     const messages: Message[] = [
-      { role: "system", content: INTERVIEW_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       { role: "assistant", content: question },
     ];
 
@@ -47,3 +51,4 @@ export async function POST() {
     );
   }
 }
+

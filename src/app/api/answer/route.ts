@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamObject } from "ai";
+import { z } from "zod";
 
-import { llmChat, safeJsonParse } from "@/lib/ai";
 import { redis } from "@/lib/redis";
 import type {
   AnswerRequest,
-  AnswerResponse,
   Message,
   ApiErrorResponse,
 } from "@/types";
@@ -14,8 +15,15 @@ export const dynamic = "force-dynamic";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 6;
 
-function isValidScore(score: unknown): score is 1 | 2 | 3 | 4 | 5 {
-  return score === 1 || score === 2 || score === 3 || score === 4 || score === 5;
+function normalizeEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
 }
 
 export async function POST(req: Request) {
@@ -48,44 +56,48 @@ export async function POST(req: Request) {
 
     const messages: Message[] = [...history, { role: "user", content: json.answer }];
 
-    const raw = await llmChat({
-      messages,
-      temperature: 0.4,
-      maxTokens: 400,
+    const apiKey = process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || "";
+    const baseUrl = process.env.LLM_BASE_URL || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1";
+    
+    if (!apiKey) {
+      return NextResponse.json<ApiErrorResponse>(
+        { error: "未配置 LLM API Key" },
+        { status: 500 },
+      );
+    }
+
+    const openai = createOpenAI({
+      apiKey: normalizeEnvValue(apiKey),
+      baseURL: normalizeEnvValue(baseUrl),
     });
 
-    const parsed = safeJsonParse<{
-      score: unknown;
-      feedback: unknown;
-      nextQuestion: unknown;
-    }>(raw);
+    const modelName = process.env.LLM_MODEL || "deepseek-chat";
 
-    if (!isValidScore(parsed.score)) {
-      throw new Error("模型返回的 score 不合法");
-    }
+    const result = streamObject({
+      model: openai(normalizeEnvValue(modelName)),
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      schema: z.object({
+        score: z.number().min(1).max(5).describe('候选人的回答得分，1到5的整数'),
+        feedback: z.string().describe('对候选人回答的评价和改进建议，可以直接指出不足'),
+        nextQuestion: z.string().describe('接下来追问的问题或者切换到的新知识点问题'),
+      }),
+      onFinish: async ({ object }) => {
+        if (object) {
+          const response = {
+            score: object.score,
+            feedback: object.feedback,
+            nextQuestion: object.nextQuestion,
+          };
+          const updatedHistory: Message[] = [
+            ...messages,
+            { role: "assistant", content: JSON.stringify(response) },
+          ];
+          await redis.set(key, updatedHistory, { ex: SESSION_TTL_SECONDS });
+        }
+      }
+    });
 
-    if (typeof parsed.feedback !== "string" || !parsed.feedback.trim()) {
-      throw new Error("模型返回的 feedback 不合法");
-    }
-
-    if (typeof parsed.nextQuestion !== "string" || !parsed.nextQuestion.trim()) {
-      throw new Error("模型返回的 nextQuestion 不合法");
-    }
-
-    const response: AnswerResponse = {
-      score: parsed.score,
-      feedback: parsed.feedback.trim(),
-      nextQuestion: parsed.nextQuestion.trim(),
-    };
-
-    const updatedHistory: Message[] = [
-      ...messages,
-      { role: "assistant", content: JSON.stringify(response) },
-    ];
-
-    await redis.set(key, updatedHistory, { ex: SESSION_TTL_SECONDS });
-
-    return NextResponse.json<AnswerResponse>(response);
+    return result.toTextStreamResponse();
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json<ApiErrorResponse>(

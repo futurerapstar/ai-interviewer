@@ -5,6 +5,11 @@ export type Message = {
   content: string;
 };
 
+export type StartRequest = {
+  resumeText?: string;
+  jdText?: string;
+};
+
 export type StartResponse = {
   sessionId: string;
   question: string;
